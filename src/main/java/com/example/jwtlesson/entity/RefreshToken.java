@@ -6,8 +6,9 @@ import lombok.*;
 import java.time.Instant;
 
 /**
- * A refresh token, one row per login (table refresh_tokens).
- * Only the SHA-256 HASH of the token is stored - like passwords, a DB leak does not leak usable tokens.
+ * One row per issued refresh token (table refresh_tokens).
+ * The refresh token itself is a JWT; here we keep only its id ("jti") -
+ * that is what makes it possible to use it only once and to revoke it on logout.
  */
 @Entity
 @Table(name = "refresh_tokens")
@@ -25,16 +26,18 @@ public class RefreshToken {
     @ToString.Include
     private Long id;
 
-    // SHA-256 of the token as hex (64 chars). The raw token is sent to the client once and never stored.
-    @Column(nullable = false, unique = true, length = 64)
-    @EqualsAndHashCode.Include   // natural key: the hash is unique
-    private String tokenHash;
+    // The "jti" claim of the refresh JWT (a random UUID)
+    @Column(nullable = false, unique = true, length = 36)
+    @EqualsAndHashCode.Include   // natural key: the jti is unique
+    @ToString.Include
+    private String tokenId;
 
     // Many tokens per user (one per login / refresh)
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
+    // Same as the JWT "exp" - lets you see (and delete) old rows in the DB
     @Column(nullable = false)
     private Instant expiresAt;
 

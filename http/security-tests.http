@@ -318,8 +318,8 @@ Content-Type: application/json
 
 ###############################################################################
 # REFRESH TOKEN (exercise 7)
-#   Access token  = JWT, 15 minutes, cannot be revoked
-#   Refresh token = random string, 7 days, stored (hashed) in the DB, works ONCE
+#   Access token  = JWT ("type": "access"), 15 minutes, cannot be revoked
+#   Refresh token = JWT ("type": "refresh"), 7 days, its id (jti) is in the DB -> works ONCE, revoked on logout
 ###############################################################################
 
 
@@ -337,7 +337,8 @@ Content-Type: application/json
         client.assert(response.status === 200, "Expected 200, got " + response.status);
         client.assert(response.body.token.split(".").length === 3, "The access token is a JWT");
         client.assert(typeof response.body.refreshToken === "string" && response.body.refreshToken.length > 0, "Missing refreshToken");
-        client.assert(response.body.refreshToken.indexOf(".") < 0, "The refresh token is a random string, not a JWT");
+        client.assert(response.body.refreshToken.split(".").length === 3, "The refresh token is a JWT too");
+        client.assert(response.body.refreshToken !== response.body.token, "Access and refresh tokens must be different");
         client.assert(response.body.refreshExpiresInMs > response.body.expiresInMs, "The refresh token must live longer than the access token");
     });
     client.global.set("refreshToken1", response.body.refreshToken);
@@ -492,5 +493,31 @@ Content-Type: application/json
     client.test("31. empty refresh token -> 400", function () {
         client.assert(response.status === 400, "Expected 400, got " + response.status);
         client.assert(response.body.fields.refreshToken !== undefined, "Expected an error on 'refreshToken'");
+    });
+%}
+
+
+### 32. A REFRESH token used as an access token -> 401 (the filter accepts only "type": "access")
+GET {{host}}/api/user/me
+Authorization: Bearer {{refreshToken3}}
+
+> {%
+    client.test("32. refresh token as Bearer -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 33. An ACCESS token sent to /refresh -> 401 (refresh accepts only "type": "refresh")
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{accessToken3}}"
+}
+
+> {%
+    client.test("33. access token on /api/auth/refresh -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
     });
 %}

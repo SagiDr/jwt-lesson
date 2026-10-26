@@ -4,57 +4,52 @@ import com.example.jwtlesson.entity.RefreshToken;
 import com.example.jwtlesson.entity.User;
 import com.example.jwtlesson.exception.InvalidRefreshTokenException;
 import com.example.jwtlesson.repository.RefreshTokenRepository;
+import com.example.jwtlesson.security.JwtUtil;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.security.SecureRandom;
 import java.time.Instant;
-import java.util.Base64;
-import java.util.HexFormat;
+import java.util.UUID;
 
 /**
- * Refresh tokens: long-lived (7 days), stored in the DB, so - unlike a JWT - they CAN be revoked.
- * Rotation: every refresh token works only once; each refresh returns a new one.
+ * Refresh tokens are JWTs (7 days). A pure JWT cannot be revoked, so each one also gets a row
+ * in the DB (by its "jti"): that is what allows logout and one-time use (rotation).
  */
 @Service
 @RequiredArgsConstructor
 public class RefreshTokenService {
 
-    private static final SecureRandom RANDOM = new SecureRandom();
-
     private final RefreshTokenRepository refreshTokenRepository;
+    private final JwtUtil jwtUtil;
 
-    @Value("${jwt.refresh-expiration-ms}")
-    private long refreshExpirationMs;
-
-    /** Creates a refresh token for the user. Returns the RAW token - the only time it exists outside the client. */
+    /** Saves a new row in the DB and returns the signed refresh JWT that points to it. */
     @Transactional
     public String create(User user) {
-        byte[] bytes = new byte[32];                 // 256 random bits - impossible to guess
-        RANDOM.nextBytes(bytes);
-        String rawToken = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        String tokenId = UUID.randomUUID().toString();   // becomes the "jti" claim
 
         refreshTokenRepository.save(RefreshToken.builder()
-                .tokenHash(hash(rawToken))           // store the HASH only
+                .tokenId(tokenId)
                 .user(user)
-                .expiresAt(Instant.now().plusMillis(refreshExpirationMs))
+                .expiresAt(Instant.now().plusMillis(jwtUtil.getRefreshExpirationMs()))
                 .build());
-        return rawToken;
+
+        return jwtUtil.generateRefreshToken(user.getUsername(), tokenId);
     }
 
     /**
-     * Validates the token and marks it as used. Returns its owner.
-     * Throws InvalidRefreshTokenException if the token is unknown, expired, already used or revoked.
+     * 1. JWT check: signature, expiry and "type": "refresh" (an access token is rejected)
+     * 2. DB check: the jti exists and was not used/revoked
+     * Marks the token as used and returns its owner. Throws InvalidRefreshTokenException otherwise.
      * noRollbackFor: when reuse is detected, the "revoke all" must be saved even though we throw.
      */
     @Transactional(noRollbackFor = InvalidRefreshTokenException.class)
-    public User consume(String rawToken) {
-        RefreshToken token = refreshTokenRepository.findByTokenHash(hash(rawToken))
+    public User consume(String refreshJwt) {
+        Claims claims = parseOrThrow(refreshJwt);
+
+        RefreshToken token = refreshTokenRepository.findByTokenId(claims.getId())
                 .orElseThrow(InvalidRefreshTokenException::new);
 
         if (token.isRevoked()) {
@@ -62,34 +57,29 @@ public class RefreshTokenService {
             refreshTokenRepository.revokeAllByUser(token.getUser());
             throw new InvalidRefreshTokenException();
         }
-        if (token.getExpiresAt().isBefore(Instant.now())) {
-            throw new InvalidRefreshTokenException();
-        }
 
-        token.setRevoked(true);                      // rotation: this token will not work again
+        token.setRevoked(true);                          // rotation: this token will not work again
         return token.getUser();
     }
 
-    /** Logout: the token stops working. An unknown token is ignored - nothing to reveal. */
+    /** Logout: the refresh token stops working. An invalid token is ignored - nothing to revoke. */
     @Transactional
-    public void revoke(String rawToken) {
-        refreshTokenRepository.findByTokenHash(hash(rawToken))
-                .ifPresent(token -> token.setRevoked(true));
-    }
-
-    public long getRefreshExpirationMs() {
-        return refreshExpirationMs;
-    }
-
-    // SHA-256 and not BCrypt: the token is already 256 random bits (nothing to brute-force),
-    // and we must FIND it by its value - BCrypt's random salt makes a lookup impossible.
-    private static String hash(String rawToken) {
+    public void revoke(String refreshJwt) {
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(rawToken.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 not available", e);
+            Claims claims = jwtUtil.parseRefreshToken(refreshJwt);
+            refreshTokenRepository.findByTokenId(claims.getId())
+                    .ifPresent(token -> token.setRevoked(true));
+        } catch (JwtException | IllegalArgumentException e) {
+            // forged / expired / not a refresh token: there is nothing to log out
+        }
+    }
+
+    private Claims parseOrThrow(String refreshJwt) {
+        try {
+            return jwtUtil.parseRefreshToken(refreshJwt);
+        } catch (JwtException | IllegalArgumentException e) {
+            // forged, expired, not a JWT, or an ACCESS token sent instead of a refresh token
+            throw new InvalidRefreshTokenException();
         }
     }
 }

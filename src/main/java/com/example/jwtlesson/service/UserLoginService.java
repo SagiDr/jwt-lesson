@@ -109,7 +109,7 @@ public class UserLoginService {
                 .toList();
 
         return new LoginResponse(accessToken, "Bearer", jwtUtil.getExpirationMs(),
-                refreshToken, refreshTokenService.getRefreshExpirationMs(),
+                refreshToken, jwtUtil.getRefreshExpirationMs(),
                 userDetails.getUsername(), roles);
     }
 }

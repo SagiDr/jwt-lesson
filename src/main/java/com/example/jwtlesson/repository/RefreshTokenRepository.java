@@ -12,9 +12,9 @@ import java.util.Optional;
 
 public interface RefreshTokenRepository extends JpaRepository<RefreshToken, Long> {
 
-    // Loads the token together with its user (one query) - the user is needed after the transaction ends
+    // Find by the JWT "jti". Loads the user in the same query - it is needed after the transaction ends.
     @EntityGraph(attributePaths = "user")
-    Optional<RefreshToken> findByTokenHash(String tokenHash);
+    Optional<RefreshToken> findByTokenId(String tokenId);
 
     // A used token came back (probably stolen): revoke every active refresh token of that user
     @Modifying
