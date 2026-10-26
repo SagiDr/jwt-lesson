@@ -23,7 +23,9 @@
 
 | שיטה | כתובת | תיאור |
 |---|---|---|
-| POST | ‎`/api/auth/login`‎ | שם + סיסמה ← JWT |
+| POST | ‎`/api/auth/login`‎ | שם + סיסמה ← Access Token ‏(JWT) + Refresh Token |
+| POST | ‎`/api/auth/refresh`‎ | ‏Refresh Token ← זוג טוקנים **חדש** (הישן מפסיק לעבוד) |
+| POST | ‎`/api/auth/logout`‎ | מבטל את ה‑Refresh Token ‏(204) |
 | POST | ‎`/api/auth/register`‎ | משתמש חדש, תמיד ‎`ROLE_USER`‎ בלבד (‏201) |
 | GET | ‎`/api/public/hello`‎ | פתוח לכולם |
 | GET | ‎`/api/user/me`‎ | פרטי המשתמש המחובר |
@@ -36,7 +38,16 @@
 **לוגין:**
 1. הלקוח שולח שם וסיסמה ל‑‎`POST /api/auth/login`‎.
 2. ‏`AuthenticationManager` טוען את המשתמש מה‑DB (דרך ‎`CustomUserDetailsService`‎) ומשווה את הסיסמה ל‑Hash של BCrypt.
-3. אם נכון – ‎`JwtUtil`‎ יוצר טוקן חתום (HS256) ומחזיר אותו.
+3. אם נכון – השרת מחזיר שני טוקנים:
+   - **Access Token** – ‏JWT חתום (HS256) של ‎`JwtUtil`‎, תקף **15 דקות**. נשלח בכל בקשה.
+   - **Refresh Token** – מחרוזת אקראית (256 ביט) של ‎`RefreshTokenService`‎, תקפה **7 ימים**. משמשת רק לקבלת Access Token חדש.
+
+**רענון (Refresh):**
+1. כשה‑Access Token פג, הלקוח שולח את ה‑Refresh Token ל‑‎`POST /api/auth/refresh`‎ – בלי סיסמה.
+2. השרת בודק אותו מול ה‑DB ומחזיר **זוג טוקנים חדש**. ה‑Refresh Token הישן מסומן כמשומש (**Rotation**).
+3. אם Refresh Token שכבר שומש חוזר שוב – כנראה שמישהו העתיק אותו. השרת מבטל **את כל** ה‑Refresh Tokens של המשתמש, וצריך להתחבר מחדש.
+
+**יציאה (Logout):** ‏‎`POST /api/auth/logout`‎ מבטל את ה‑Refresh Token. ה‑Access Token ממשיך לעבוד עד שיפוג – ‏JWT אי אפשר לבטל, ולכן הוא קצר.
 
 **בקשה מוגנת:**
 1. הלקוח שולח ‎`Authorization: Bearer <token>`‎.
@@ -76,14 +87,17 @@ src/main/java/com/example/jwtlesson/
 ├── entity/
 │   ├── User.java                  טבלת users (הצד הבעלים של רבים-לרבים)
 │   ├── Role.java                  טבלת roles (הצד ההפוך, mappedBy)
-│   └── RoleName.java              enum: ROLE_USER, ROLE_ADMIN
+│   ├── RoleName.java              enum: ROLE_USER, ROLE_ADMIN
+│   └── RefreshToken.java          טבלת refresh_tokens: Hash של הטוקן, משתמש, תוקף, בוטל?
 ├── repository/
 │   ├── UserRepository.java        findByUsername + @EntityGraph לטעינת התפקידים
-│   └── RoleRepository.java        findByName
+│   ├── RoleRepository.java        findByName
+│   └── RefreshTokenRepository.java  findByTokenHash + ביטול כל הטוקנים של משתמש
 ├── dto/                           מה נכנס ויוצא מה-API (records)
 │   ├── LoginRequest.java
 │   ├── RegisterRequest.java       בלי שדה roles – הלקוח לא בוחר תפקיד
-│   ├── LoginResponse.java
+│   ├── RefreshRequest.java        גוף הבקשה של refresh ו-logout
+│   ├── LoginResponse.java         Access Token + Refresh Token + תפקידים
 │   └── UserResponse.java          בלי סיסמה, תפקידים כמחרוזות
 ├── security/
 │   ├── CustomUserDetailsService.java  טוען משתמש מה-DB עבור Spring Security
@@ -93,14 +107,16 @@ src/main/java/com/example/jwtlesson/
 │   ├── SecurityConfig.java        כל חוקי האבטחה במקום אחד
 │   └── DataInitializer.java       יוצר תפקידים + admin/user בעלייה, אם חסרים
 ├── service/
-│   ├── UserLoginService.java      לוגין והרשמה
+│   ├── UserLoginService.java      לוגין, הרשמה, רענון ויציאה
+│   ├── RefreshTokenService.java   יצירה, בדיקה וביטול של Refresh Tokens
 │   └── UserService.java           שליפת משתמשים והמרה ל-DTO
 ├── controller/
-│   ├── UserLoginController.java   /api/auth/login, /api/auth/register
+│   ├── UserLoginController.java   /api/auth/login, register, refresh, logout
 │   └── ResourceController.java    נקודת קצה אחת לכל אזור אבטחה
 └── exception/
     ├── GlobalExceptionHandler.java   Exceptions -> JSON (401 / 409 / 400)
-    └── UsernameTakenException.java
+    ├── UsernameTakenException.java
+    └── InvalidRefreshTokenException.java
 ```
 
 <div dir="rtl">
@@ -129,6 +145,14 @@ erDiagram
         bigint user_id FK
         bigint role_id FK
     }
+    USERS ||--o{ REFRESH_TOKENS : "logs in with"
+    REFRESH_TOKENS {
+        bigint id PK
+        varchar token_hash UK "SHA-256, 64 chars"
+        bigint user_id FK
+        timestamp expires_at
+        boolean revoked
+    }
 ```
 
 <div dir="rtl">
@@ -150,6 +174,11 @@ erDiagram
 | ה‑Filter טוען את המשתמש מה‑DB בכל בקשה | משתמש שנחסם או ששונה לו תפקיד – השינוי תקף מיד |
 | ‎`authenticationEntryPoint`‎ מוגדר במפורש | בלעדיו Spring מחזיר 403 גם כשאין טוקן, במקום 401 |
 | אותה הודעת שגיאה לסיסמה שגויה ולמשתמש לא קיים | לא לגלות לתוקף אילו שמות משתמש קיימים |
+| Access Token קצר (15 דק') + Refresh Token ארוך (7 ימים) | ‏JWT אי אפשר לבטל – אז מגבילים את הזמן שטוקן גנוב שווה משהו, בלי להכריח התחברות כל רבע שעה |
+| ה‑Refresh Token הוא מחרוזת אקראית ב‑DB, לא JWT | אפשר לבטל אותו (Logout), ואי אפשר להשתמש בו בטעות כ‑Access Token |
+| ב‑DB נשמר רק **Hash** ‏(SHA‑256) של ה‑Refresh Token | כמו סיסמאות – דליפה של ה‑DB לא נותנת טוקנים שעובדים |
+| ‏SHA‑256 ולא BCrypt לטוקן | הטוקן כבר אקראי לגמרי (אין מה לנחש), וצריך **למצוא** אותו לפי הערך – ה‑Salt של BCrypt מונע חיפוש |
+| ‏Rotation – כל Refresh Token עובד פעם אחת | טוקן שחוזר שוב = גניבה. השרת מבטל את כל הטוקנים של המשתמש |
 
 > ה‑Payload של JWT **לא מוצפן** – רק חתום. כל אחד יכול לקרוא אותו, ולכן לא שמים בו מידע רגיש.
 
@@ -178,7 +207,7 @@ docker run --name pg-lesson -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=jwt_les
 | ‎`admin`‎ | ‎`Admin123!`‎ | ‏ROLE_ADMIN, ROLE_USER |
 | ‎`user`‎ | ‎`User123!`‎ | ‏ROLE_USER |
 
-**4. בדיקות:** פותחים את ‎`http/security-tests.http`‎ ב‑IntelliJ, בוחרים סביבה **dev** ומריצים **Run All Requests in File**. ‏19 בדיקות – לוגין, 401/403, טוקן מזויף, הרשמה ועוד.
+**4. בדיקות:** פותחים את ‎`http/security-tests.http`‎ ב‑IntelliJ, בוחרים סביבה **dev** ומריצים **Run All Requests in File**. ‏30 בדיקות – לוגין, 401/403, טוקן מזויף, הרשמה, ו‑Refresh Token (רענון, שימוש חוזר, Logout).
 
 > הסוד של ה‑JWT והסיסמאות ב‑‎`application.properties`‎ הם ברירות מחדל לשיעור בלבד. בייצור מגדירים אותם במשתני סביבה (‎`JWT_SECRET`‎, ‎`DB_PASSWORD`‎, ‎`ADMIN_PASSWORD`‎, ‎`USER_PASSWORD`‎).
 

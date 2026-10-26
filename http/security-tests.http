@@ -312,5 +312,185 @@ Content-Type: application/json
 #   a. In application.properties set:  jwt.expiration-ms=60000   (1 minute)
 #   b. Restart the application, run request 7 (user login).
 #   c. Wait more than 1 minute, run request 8 -> expect 401.
-#   d. Set jwt.expiration-ms back to 3600000 and restart.
+#   d. Set jwt.expiration-ms back to 900000 and restart.
 ###############################################################################
+
+
+###############################################################################
+# REFRESH TOKEN (exercise 7)
+#   Access token  = JWT, 15 minutes, cannot be revoked
+#   Refresh token = random string, 7 days, stored (hashed) in the DB, works ONCE
+###############################################################################
+
+
+### 21. Login -> the response also has a refresh token (saved as refreshToken1)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "user",
+  "password": "User123!"
+}
+
+> {%
+    client.test("21. login returns access token + refresh token", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(response.body.token.split(".").length === 3, "The access token is a JWT");
+        client.assert(typeof response.body.refreshToken === "string" && response.body.refreshToken.length > 0, "Missing refreshToken");
+        client.assert(response.body.refreshToken.indexOf(".") < 0, "The refresh token is a random string, not a JWT");
+        client.assert(response.body.refreshExpiresInMs > response.body.expiresInMs, "The refresh token must live longer than the access token");
+    });
+    client.global.set("refreshToken1", response.body.refreshToken);
+%}
+
+
+### 22. Refresh -> 200, a NEW access token and a NEW refresh token (rotation)
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refreshToken1}}"
+}
+
+> {%
+    client.test("22. refresh -> 200 with new tokens", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(response.body.username === "user", "Expected username 'user'");
+        client.assert(response.body.refreshToken !== client.global.get("refreshToken1"), "The refresh token must change on every refresh");
+    });
+    client.global.set("refreshedAccessToken", response.body.token);
+    client.global.set("refreshToken2", response.body.refreshToken);
+%}
+
+
+### 23. The NEW access token works -> 200
+GET {{host}}/api/user/me
+Authorization: Bearer {{refreshedAccessToken}}
+
+> {%
+    client.test("23. refreshed access token on /api/user/me -> 200", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(response.body.username === "user", "Expected username 'user'");
+    });
+%}
+
+
+### 24. Reuse the OLD refresh token -> 401 (every refresh token works only once)
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refreshToken1}}"
+}
+
+> {%
+    client.test("24. used refresh token -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+        client.assert(response.body.error === "Invalid or expired refresh token", "Unexpected message");
+    });
+%}
+
+
+### 25. Reuse = theft suspected -> ALL the user's refresh tokens were revoked, even the newest -> 401
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refreshToken2}}"
+}
+
+> {%
+    client.test("25. after reuse, the newest refresh token is revoked too -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 26. Login again (saved as accessToken3 + refreshToken3)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "user",
+  "password": "User123!"
+}
+
+> {%
+    client.test("26. login -> 200", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+    });
+    client.global.set("accessToken3", response.body.token);
+    client.global.set("refreshToken3", response.body.refreshToken);
+%}
+
+
+### 27. Logout -> 204
+POST {{host}}/api/auth/logout
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refreshToken3}}"
+}
+
+> {%
+    client.test("27. logout -> 204", function () {
+        client.assert(response.status === 204, "Expected 204, got " + response.status);
+    });
+%}
+
+
+### 28. Refresh after logout -> 401
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refreshToken3}}"
+}
+
+> {%
+    client.test("28. refresh token after logout -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 29. The ACCESS token still works after logout -> 200 (a JWT cannot be revoked - this is why it lives only 15 minutes)
+GET {{host}}/api/user/me
+Authorization: Bearer {{accessToken3}}
+
+> {%
+    client.test("29. access token still valid until it expires -> 200", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+    });
+%}
+
+
+### 30. Unknown refresh token -> 401
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "this-is-not-a-real-refresh-token"
+}
+
+> {%
+    client.test("30. unknown refresh token -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 31. Empty refresh token -> 400 (validation)
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": ""
+}
+
+> {%
+    client.test("31. empty refresh token -> 400", function () {
+        client.assert(response.status === 400, "Expected 400, got " + response.status);
+        client.assert(response.body.fields.refreshToken !== undefined, "Expected an error on 'refreshToken'");
+    });
+%}

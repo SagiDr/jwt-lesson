@@ -22,6 +22,12 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.UNAUTHORIZED, "Invalid username or password");
     }
 
+    // Unknown / expired / already used / revoked refresh token -> the client must log in again
+    @ExceptionHandler(InvalidRefreshTokenException.class)
+    public ResponseEntity<Map<String, Object>> handleInvalidRefreshToken(InvalidRefreshTokenException ex) {
+        return error(HttpStatus.UNAUTHORIZED, ex.getMessage());
+    }
+
     @ExceptionHandler(UsernameTakenException.class)
     public ResponseEntity<Map<String, Object>> handleUsernameTaken(UsernameTakenException ex) {
         return error(HttpStatus.CONFLICT, ex.getMessage());
